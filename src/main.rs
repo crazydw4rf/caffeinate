@@ -1,18 +1,27 @@
 use std::collections::HashMap;
+use std::fs::{File, TryLockError};
 
+use anyhow::Result;
 use futures_util::StreamExt;
 use tracing::{debug, error, info};
 use zbus::zvariant::{OwnedFd, OwnedValue};
 use zbus::{Connection, MatchRule, MessageStream};
 
+const LOCK_FILE: &str = "/tmp/caffeinate.lock";
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<()> {
     let log_level = std::env::var("LOG_LEVEL").unwrap_or("info".to_string());
 
     tracing_subscriber::fmt()
         .with_env_filter(log_level)
         .with_line_number(true)
         .init();
+
+    let _file_lock = match check_single_instance() {
+        Some(f) => f,
+        None => return Ok(()),
+    };
 
     let system_conn = Connection::system().await?;
     let sesion_conn = Connection::session().await?;
@@ -96,7 +105,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn inhibit_block(conn: &zbus::Connection) -> anyhow::Result<OwnedFd> {
+async fn inhibit_block(conn: &zbus::Connection) -> Result<OwnedFd> {
     // https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.login1.html
     let fd = conn
         .call_method(
@@ -116,4 +125,37 @@ async fn inhibit_block(conn: &zbus::Connection) -> anyhow::Result<OwnedFd> {
         .deserialize::<OwnedFd>()?;
 
     Ok(fd)
+}
+
+fn check_single_instance() -> Option<File> {
+    debug!("opening lock file '{}'", LOCK_FILE);
+
+    let file = match std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(LOCK_FILE)
+    {
+        Ok(f) => f,
+        Err(err) => {
+            error!(error = ?err, "could not open lock file '{}'", LOCK_FILE);
+
+            return None;
+        }
+    };
+
+    if let Err(lock_error) = file.try_lock() {
+        if let TryLockError::Error(err) = lock_error {
+            error!(
+                error = ?err,
+                "error occurred while trying to lock file '{}'", LOCK_FILE
+            );
+
+            return None;
+        }
+
+        error!("another instance is running");
+        return None;
+    }
+
+    Some(file)
 }
