@@ -1,0 +1,8 @@
+[*]
+indent_style = space
+indent_size = 2
+
+[{*.md,*.sql,*.rs,*.yaml,*.yml}]
+indent_style = space
+indent_size = 4
+
