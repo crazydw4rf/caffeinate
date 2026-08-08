@@ -7,7 +7,7 @@ use tracing::{debug, error, info};
 use zbus::zvariant::{OwnedFd, OwnedValue};
 use zbus::{Connection, MatchRule, MessageStream};
 
-const LOCK_FILE: &str = "/tmp/caffeinate.lock";
+const LOCK_FILE_PATH: &str = "/tmp/caffeinate.lock";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -132,8 +132,9 @@ fn check_single_instance() -> Option<File> {
 
     let file = match std::fs::OpenOptions::new()
         .write(true)
+        .create(true)
         .truncate(true)
-        .open(LOCK_FILE)
+        .open(LOCK_FILE_PATH)
     {
         Ok(f) => f,
         Err(err) => {
