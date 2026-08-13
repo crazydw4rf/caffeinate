@@ -8,12 +8,11 @@ name = "caffeinate"
 path = "./src/main.rs"
 
 [dependencies]
-zbus = { version = "5.18", default-features = false, features = ["tokio"] }
+zbus = { version = "5.18", features = ["blocking-api"] }
 anyhow = "1.0.104"
-tokio = { version = "1.53", features = ["full"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-futures-util = "0.3"
+pipewire-native = "0.1.4"
 
 [profile.release]
 opt-level = 3

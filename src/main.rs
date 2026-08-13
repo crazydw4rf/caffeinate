@@ -1,10 +1,15 @@
 use anyhow::{Result, bail};
-use futures_util::StreamExt;
-use std::collections::HashMap;
+use pipewire_native::context::Context;
+use pipewire_native::properties::Properties;
+use pipewire_native::proxy::node::{Node, NodeEvents};
+use pipewire_native::proxy::registry::RegistryEvents;
+use pipewire_native::thread_loop::ThreadLoop;
+use pipewire_native::types;
 use std::fs::{File, TryLockError};
 use tracing::{debug, error, info};
-use zbus::zvariant::{OwnedFd, OwnedValue};
-use zbus::{Connection, MatchRule, MessageStream};
+use tracing_subscriber::EnvFilter;
+use zbus::blocking::Connection;
+use zbus::zvariant::OwnedFd;
 
 const LOCK_FILE_PATH: &str = "/tmp/caffeinate.lock";
 
@@ -12,59 +17,106 @@ const DBUS_LOGIND_SERVICE: &str = "org.freedesktop.login1";
 const DBUS_LOGIND_PATH: &str = "/org/freedesktop/login1";
 const DBUS_LOGIND_MANAGER_INTERFACE: &str = "org.freedesktop.login1.Manager";
 
-const DBUS_PROPERTIES_SIGNAL_INTERFACE: &str = "org.freedesktop.DBus.Properties";
-const DBUS_PROPERTIES_SIGNAL_MEMBER: &str = "PropertiesChanged";
-
-const DBUS_MPRIS_PATH: &str = "/org/mpris/MediaPlayer2";
-
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum PlaybackStatus {
     Playing,
     StoppedOrPaused,
 }
 
 fn init_tracing() {
-    let log_level = std::env::var("LOG_LEVEL").unwrap_or("info".to_string());
-
     tracing_subscriber::fmt()
-        .with_env_filter(log_level)
+        .with_env_filter(
+            EnvFilter::try_from_env("LOG_LEVEL").unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .with_line_number(true)
         .init();
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     init_tracing();
 
     let _instance_lock = ensure_single_instance()?;
 
-    let system_conn = Connection::system().await?;
-    let sesion_conn = Connection::session().await?;
+    pipewire_native::init();
 
-    let mpris_rule = MatchRule::builder()
-        .msg_type(zbus::message::Type::Signal)
-        .interface(DBUS_PROPERTIES_SIGNAL_INTERFACE)?
-        .member(DBUS_PROPERTIES_SIGNAL_MEMBER)?
-        .path(DBUS_MPRIS_PATH)?
-        .build();
+    let pw_main_loop = ThreadLoop::new(&Properties::new()).unwrap();
+    let pw_context = Context::new(pw_main_loop.main_loop(), Properties::new())?;
+    let pw_core = pw_context.connect(None)?;
 
-    let mut mpris_signal_stream =
-        MessageStream::for_match_rule(mpris_rule, &sesion_conn, Some(1)).await?;
+    let pw_registry = pw_core.registry()?;
+    let pw_registry_clone = pw_registry.clone();
+
+    let (playback_status_tx, playback_status_rx) =
+        std::sync::mpsc::sync_channel::<PlaybackStatus>(1);
+
+    let mut last_playback_status = PlaybackStatus::StoppedOrPaused;
+
+    pw_registry.add_listener(RegistryEvents {
+        global: Some(Box::new(move |id, _, type_, version, _| {
+            if type_ == types::interface::NODE {
+                if let Ok(object) = pw_registry_clone.bind(id, type_, version) {
+                    let node = object.downcast::<Node>().unwrap();
+
+                    let playback_status_tx = playback_status_tx.clone();
+
+                    node.add_listener(NodeEvents {
+                        info: Some(Box::new(move |info| {
+                            use pipewire_native::proxy::node::NodeChangeMask;
+
+                            // https://docs.pipewire.org/src_2pipewire_2node_8h.html
+                            // PW_NODE_STATE_ERROR = -1
+                            // PW_NODE_STATE_CREATING = 0
+                            // PW_NODE_STATE_SUSPENDED = 1
+                            // PW_NODE_STATE_IDLE = 2
+                            // PW_NODE_STATE_RUNNING = 3
+
+                            if info.mask.contains(NodeChangeMask::STATE) {
+                                match info.state as u32 {
+                                    3 => {
+                                        if last_playback_status == PlaybackStatus::Playing {
+                                            return;
+                                        }
+                                        last_playback_status = PlaybackStatus::Playing;
+
+                                        playback_status_tx.send(PlaybackStatus::Playing).unwrap();
+                                    }
+                                    _ => {
+                                        if last_playback_status == PlaybackStatus::StoppedOrPaused {
+                                            return;
+                                        }
+                                        last_playback_status = PlaybackStatus::StoppedOrPaused;
+
+                                        playback_status_tx
+                                            .send(PlaybackStatus::StoppedOrPaused)
+                                            .unwrap();
+                                    }
+                                }
+                            }
+                        })),
+                        param: None,
+                    });
+                }
+            }
+        })),
+        ..Default::default()
+    });
+
+    pw_main_loop.run();
+
+    let system_conn = Connection::system()?;
 
     let mut inhibit_lock_fd = Option::<OwnedFd>::None;
     let mut is_lock_active = false;
 
-    let (playback_status_tx, mut playback_status_rx) =
-        tokio::sync::mpsc::channel::<PlaybackStatus>(1);
-
-    tokio::spawn(async move {
-        while let Some(status) = playback_status_rx.recv().await {
+    std::thread::spawn(move || {
+        while let Ok(status) = playback_status_rx.recv() {
             match status {
                 PlaybackStatus::Playing => {
                     if is_lock_active {
                         continue;
                     }
 
-                    let fd = match acquire_inhibitor_lock(&system_conn).await {
+                    let fd = match acquire_inhibitor_lock(&system_conn) {
                         Ok(fd) => {
                             info!("Inhibit lock acquired");
                             fd
@@ -81,7 +133,6 @@ async fn main() -> Result<()> {
                 }
                 PlaybackStatus::StoppedOrPaused => {
                     if is_lock_active {
-                        // NOTE: Dropping the fd will release the inhibit lock.
                         if inhibit_lock_fd.take().is_some() {
                             is_lock_active = false;
                             info!("Inhibit lock released");
@@ -94,38 +145,12 @@ async fn main() -> Result<()> {
         }
     });
 
-    while let Some(Ok(msg)) = mpris_signal_stream.next().await {
-        // https://specifications.freedesktop.org/mpris/latest/Player_Interface.html
-        if let Ok((_, dict, _)) = msg
-            .body()
-            .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
-            && let Some(status_value) = dict.get("PlaybackStatus")
-            && let Ok(status) = status_value.downcast_ref::<&str>()
-        {
-            match status {
-                "Playing" => {
-                    debug!("Active media playback detected (Playing)");
-                    if let Err(e) = playback_status_tx.send(PlaybackStatus::Playing).await {
-                        error!("Failed to send playback status: {:?}", e);
-                    }
-                }
-                _ => {
-                    debug!("Active media playback detected (Paused/Stopped)");
-                    if let Err(e) = playback_status_tx
-                        .send(PlaybackStatus::StoppedOrPaused)
-                        .await
-                    {
-                        error!("Failed to send playback status: {:?}", e);
-                    }
-                }
-            }
-        }
-    }
+    std::thread::park();
 
     Ok(())
 }
 
-async fn acquire_inhibitor_lock(conn: &zbus::Connection) -> Result<OwnedFd> {
+fn acquire_inhibitor_lock(conn: &Connection) -> Result<OwnedFd> {
     // https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.login1.html
     let fd = conn
         .call_method(
@@ -139,8 +164,7 @@ async fn acquire_inhibitor_lock(conn: &zbus::Connection) -> Result<OwnedFd> {
                 "Media player is playing something",
                 "block",
             ),
-        )
-        .await?
+        )?
         .body()
         .deserialize::<OwnedFd>()?;
 

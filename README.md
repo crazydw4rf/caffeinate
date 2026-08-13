@@ -37,6 +37,5 @@ caffeinate
 
 ## TODO
 
-- [ ] allow detecting non-mpris media player
 - [ ] waybar support
 - [ ] write proper docs
