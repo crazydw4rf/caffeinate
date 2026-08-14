@@ -18,42 +18,14 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - os-name: FreeBSD-x86_64
-            runs-on: ubuntu-24.04
-            target: x86_64-unknown-freebsd
-            bin: caffeinate
-            name: caffeinate-FreeBSD-x86_64.tar.gz
-            skip-tests: true
           - os-name: Linux-x86_64
             runs-on: ubuntu-24.04
-            target: x86_64-unknown-linux-musl
+            target: x86_64-unknown-linux-gnu
             bin: caffeinate
-            name: caffeinate-Linux-x86_64-musl.tar.gz
-          - os-name: Linux-aarch64
-            runs-on: ubuntu-24.04
-            target: aarch64-unknown-linux-musl
-            bin: caffeinate
-            name: caffeinate-Linux-aarch64-musl.tar.gz
-          - os-name: Linux-arm
-            runs-on: ubuntu-24.04
-            target: arm-unknown-linux-musleabi
-            bin: caffeinate
-            name: caffeinate-Linux-arm-musl.tar.gz
+            name: caffeinate-Linux-x86_64-gnu.tar.gz
         toolchain:
           - stable
-        include:
-          - platform:
-              os-name: Linux-x86_64
-              runs-on: ubuntu-24.04
-              target: x86_64-unknown-linux-musl
-              bin: caffeinate
-            toolchain: stable
-          - platform:
-              os-name: Linux-x86_64
-              runs-on: ubuntu-24.04
-              target: x86_64-unknown-linux-musl
-              bin: caffeinate
-            toolchain: nightly
+
     steps:
       - uses: actions/checkout@v7
       - name: Build binary
