@@ -1,0 +1,72 @@
+on:
+  push:
+    branches:
+      - "main"
+    tags:
+      - "*"
+  workflow_dispatch:
+
+env:
+  GITHUB_TOKEN: ${{ github.token }}
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: ${{ matrix.platform.os-name }} with rust ${{ matrix.toolchain }}
+    runs-on: ${{ matrix.platform.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - os-name: FreeBSD-x86_64
+            runs-on: ubuntu-24.04
+            target: x86_64-unknown-freebsd
+            bin: caffeinate
+            name: caffeinate-FreeBSD-x86_64.tar.gz
+            skip-tests: true
+          - os-name: Linux-x86_64
+            runs-on: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            bin: caffeinate
+            name: caffeinate-Linux-x86_64-musl.tar.gz
+          - os-name: Linux-aarch64
+            runs-on: ubuntu-24.04
+            target: aarch64-unknown-linux-musl
+            bin: caffeinate
+            name: caffeinate-Linux-aarch64-musl.tar.gz
+          - os-name: Linux-arm
+            runs-on: ubuntu-24.04
+            target: arm-unknown-linux-musleabi
+            bin: caffeinate
+            name: caffeinate-Linux-arm-musl.tar.gz
+        toolchain:
+          - stable
+        include:
+          - platform:
+              os-name: Linux-x86_64
+              runs-on: ubuntu-24.04
+              target: x86_64-unknown-linux-musl
+              bin: caffeinate
+            toolchain: stable
+          - platform:
+              os-name: Linux-x86_64
+              runs-on: ubuntu-24.04
+              target: x86_64-unknown-linux-musl
+              bin: caffeinate
+            toolchain: nightly
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build binary
+        uses: houseabsolute/actions-rust-cross@v1
+        with:
+          command: "build"
+          target: ${{ matrix.platform.target }}
+          toolchain: ${{ matrix.toolchain }}
+          args: "--locked --release"
+          strip: true
+      - name: Publish artifacts and release
+        uses: houseabsolute/actions-rust-release@v0
+        with:
+          executable-name: caffeinate
+          target: ${{ matrix.platform.target }}
+        if: matrix.toolchain == 'stable'
