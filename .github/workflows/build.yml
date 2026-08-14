@@ -41,4 +41,6 @@ jobs:
         with:
           executable-name: caffeinate
           target: ${{ matrix.platform.target }}
+          extra-file: ""
+          changes-file: ""
         if: matrix.toolchain == 'stable'
