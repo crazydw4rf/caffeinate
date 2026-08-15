@@ -14,8 +14,7 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 pipewire-native = "0.1.4"
 
-[profile.dist]
-inherits = "release"
+[profile.release]
 lto = "thin"
 strip = true
 
