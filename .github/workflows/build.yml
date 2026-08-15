@@ -3,15 +3,14 @@ on:
     branches:
       - "main"
     tags:
-      - "*"
-  workflow_dispatch:
+      - "v*"
 
 env:
   GITHUB_TOKEN: ${{ github.token }}
   RUST_BACKTRACE: 1
 
 jobs:
-  test:
+  build:
     name: ${{ matrix.platform.os-name }} with rust ${{ matrix.toolchain }}
     runs-on: ${{ matrix.platform.runs-on }}
     strategy:
@@ -21,8 +20,6 @@ jobs:
           - os-name: Linux-x86_64
             runs-on: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-            bin: caffeinate
-            name: caffeinate-Linux-x86_64-gnu.tar.gz
         toolchain:
           - stable
 
@@ -34,13 +31,13 @@ jobs:
           command: "build"
           target: ${{ matrix.platform.target }}
           toolchain: ${{ matrix.toolchain }}
-          args: "--locked --release"
+          args: "--locked --profile dist"
           strip: true
       - name: Publish artifacts and release
         uses: houseabsolute/actions-rust-release@v0
         with:
           executable-name: caffeinate
           target: ${{ matrix.platform.target }}
-          extra-file: ""
+          extra-files: ""
           changes-file: ""
         if: matrix.toolchain == 'stable'

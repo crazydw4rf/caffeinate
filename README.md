@@ -1,8 +1,7 @@
-# caffeinate-rs
+# caffeinate
 
 Just a simple program to prevent your machine from going to sleep while playing
 audio/video.
-Only supports MPRIS media players for now.
 
 ## How to
 

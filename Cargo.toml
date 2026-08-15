@@ -1,6 +1,6 @@
 [package]
-name = "caffeinate-rs"
-version = "0.1.2"
+name = "caffeinate"
+version = "0.1.3"
 edition = "2024"
 
 [[bin]]
@@ -14,12 +14,9 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 pipewire-native = "0.1.4"
 
-[profile.release]
-opt-level = 3
+[profile.dist]
+inherits = "release"
 lto = "thin"
-codegen-units = 16
-panic = "abort"
-strip = true
 
 [profile.dev]
 opt-level = 0
