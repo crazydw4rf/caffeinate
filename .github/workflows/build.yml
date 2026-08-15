@@ -32,7 +32,7 @@ jobs:
           target: ${{ matrix.platform.target }}
           toolchain: ${{ matrix.toolchain }}
           args: "--locked --profile dist"
-          strip: true
+          strip: false
       - name: Publish artifacts and release
         uses: houseabsolute/actions-rust-release@v0
         with:

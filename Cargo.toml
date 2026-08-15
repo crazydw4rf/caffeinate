@@ -17,6 +17,7 @@ pipewire-native = "0.1.4"
 [profile.dist]
 inherits = "release"
 lto = "thin"
+strip = true
 
 [profile.dev]
 opt-level = 0
