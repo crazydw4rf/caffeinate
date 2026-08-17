@@ -1,13 +1,11 @@
 use anyhow::{Result, bail};
-use pipewire_native::context::Context;
-use pipewire_native::properties::Properties;
-use pipewire_native::proxy::node::{Node, NodeEvents, NodeState};
-use pipewire_native::proxy::registry::RegistryEvents;
-use pipewire_native::thread_loop::ThreadLoop;
-use pipewire_native::types as pw_types;
+use pipewire as pw;
+use pipewire::node::NodeState;
+use pw::{node::Node, types::ObjectType};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::{File, TryLockError};
-use std::sync::{Arc, Mutex};
+use std::rc::Rc;
 use tracing::{debug, error, info};
 use tracing_subscriber::EnvFilter;
 use zbus::blocking::Connection;
@@ -30,81 +28,93 @@ fn main() -> Result<()> {
 
     let _instance_lock = ensure_single_instance()?;
 
-    pipewire_native::init();
+    pw::init();
 
-    let pw_main_loop = ThreadLoop::new(&Properties::new()).unwrap();
-    let pw_context = Context::new(pw_main_loop.main_loop(), Properties::new())?;
-    let pw_core = pw_context.connect(None)?;
+    let pw_main_loop = pw::main_loop::MainLoopRc::new(None)?;
+    let pw_context = pw::context::ContextRc::new(&pw_main_loop, None)?;
+    let pw_core = pw_context.connect_rc(None)?;
+    let pw_registry = pw_core.get_registry_rc()?;
+    let pw_registry_weak = pw_registry.downgrade();
 
-    let pw_registry = pw_core.registry()?;
-    let pw_registry_clone = pw_registry.clone();
+    let node_proxies: Rc<RefCell<HashMap<u32, Box<dyn std::any::Any>>>> =
+        Rc::new(RefCell::new(HashMap::new()));
+
+    let running_nodes: Rc<RefCell<HashMap<u32, ()>>> = Rc::new(RefCell::new(HashMap::new()));
+
+    let node_proxies_clone = Rc::clone(&node_proxies);
 
     let (audio_state_tx, audio_state_rx) = std::sync::mpsc::sync_channel::<AudioState>(1);
 
-    let running_nodes: Arc<Mutex<HashMap<u32, ()>>> = Arc::new(Mutex::new(HashMap::new()));
+    let _registry_listener = pw_registry
+        .add_listener_local()
+        .global(move |global| {
+            if global.type_ != ObjectType::Node {
+                return;
+            }
 
-    pw_registry.add_listener(RegistryEvents {
-        global: Some(Box::new(move |id, _, type_, version, _| {
-            if type_ == pw_types::interface::NODE
-                && let Ok(object) = pw_registry_clone.bind(id, type_, version)
-            {
-                let node = match object.downcast::<Node>() {
-                    Some(n) => n,
-                    None => {
-                        error!("Failed to downcast proxy object to Node");
-                        return;
-                    }
-                };
+            let Some(registry) = pw_registry_weak.upgrade() else {
+                return;
+            };
 
-                let audio_state_tx = audio_state_tx.clone();
-                let running_nodes = Arc::clone(&running_nodes);
+            let node_name = global
+                .props
+                .as_ref()
+                .and_then(|p| p.get("node.name"))
+                .unwrap_or("unknown");
 
-                node.add_listener(NodeEvents {
-                    info: Some(Box::new(move |info| {
-                        use pipewire_native::proxy::node::NodeChangeMask;
+            debug!(id = global.id, name = node_name, "Node registered");
 
-                        // https://docs.pipewire.org/src_2pipewire_2node_8h.html
-                        // NOTE: The NodeState enum is off by one, so 3 here means the audio is running.
-                        // This might be a bug in the pipewire_native crate.
+            let node: Node = match registry.bind(global) {
+                Ok(n) => n,
+                Err(e) => {
+                    error!("Failed to bind to node {}: {}", global.id, e);
+                    return;
+                }
+            };
 
-                        let node_state = match info.state {
-                            NodeState::Error => NodeState::Creating,
-                            NodeState::Creating => NodeState::Suspended,
-                            NodeState::Suspended => NodeState::Idle,
-                            NodeState::Idle => NodeState::Running,
-                            _ => NodeState::Error,
-                        };
+            let running_nodes = Rc::clone(&running_nodes);
+            let audio_state_tx = audio_state_tx.clone();
 
-                        debug!("Node id: {} - state: {:?}", info.id, node_state);
+            let node_listener = node
+                .add_listener_local()
+                .info(move |info| {
+                    let state = info.state();
 
-                        if info.mask.contains(NodeChangeMask::STATE) {
-                            match node_state {
-                                NodeState::Running => {
-                                    if let Err(e) = audio_state_tx.send(AudioState::Running) {
-                                        error!("Failed to send audio state to channel: {e}");
-                                        return;
-                                    }
+                    debug!(id = ?info.id(), state = ?state, "Node listener");
 
-                                    running_nodes.lock().unwrap().insert(info.id, ());
-                                }
-                                _ => {
-                                    if let Ok(mut rn) = running_nodes.try_lock()
-                                        && let Some(_) = rn.remove(&info.id)
-                                        && rn.is_empty()
-                                        && let Err(e) = audio_state_tx.send(AudioState::NotRunning)
-                                    {
-                                        error!("Failed to send audio state to channel: {e}");
-                                    }
-                                }
+                    match state {
+                        NodeState::Running => {
+                            if let Err(e) = audio_state_tx.send(AudioState::Running) {
+                                error!("Failed to send audio state to channel: {e}");
+                                return;
+                            }
+
+                            running_nodes.borrow_mut().insert(info.id(), ());
+                        }
+                        _ => {
+                            let mut running_nodes = running_nodes.borrow_mut();
+
+                            if let Some(_) = running_nodes.remove(&info.id())
+                                && running_nodes.is_empty()
+                                && let Err(e) = audio_state_tx.send(AudioState::NotRunning)
+                            {
+                                error!("Failed to send audio state to channel: {e}");
                             }
                         }
-                    })),
-                    param: None,
-                });
+                    }
+                })
+                .register();
+
+            node_proxies
+                .borrow_mut()
+                .insert(global.id, Box::new((node, node_listener)));
+        })
+        .global_remove(move |id| {
+            if node_proxies_clone.borrow_mut().remove(&id).is_some() {
+                debug!(id, "Node removed");
             }
-        })),
-        ..Default::default()
-    });
+        })
+        .register();
 
     let system_conn = Connection::system()?;
 
@@ -143,7 +153,9 @@ fn main() -> Result<()> {
 
     pw_main_loop.run();
 
-    std::thread::park();
+    unsafe {
+        pw::deinit();
+    }
 
     Ok(())
 }

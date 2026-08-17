@@ -1,6 +1,6 @@
 [package]
 name = "caffeinate"
-version = "0.1.3"
+version = "0.2.0"
 edition = "2024"
 
 [[bin]]
@@ -12,9 +12,12 @@ zbus = { version = "5.18", features = ["blocking-api"] }
 anyhow = "1.0.104"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-pipewire-native = "0.1.4"
+pipewire = "0.10"
 
 [profile.release]
+opt-level = 3
+codegen-units = 16
+debug = false
 lto = "thin"
 strip = true
 
